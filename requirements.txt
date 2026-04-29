@@ -7,3 +7,4 @@ jinja2
 python-multipart
 python-dotenv
 markdown
+psycopg[binary]>=3.2

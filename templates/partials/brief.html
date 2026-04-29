@@ -1,0 +1,19 @@
+{% if brief.human_review_flags %}
+<div class="human-review-summary">
+    <h3>Items Flagged for Human Review ({{ brief.human_review_flags | length }})</h3>
+    {% for flag in brief.human_review_flags %}
+    <div class="flag-card">
+        <strong>{{ flag.section }}</strong>: {{ flag.issue }}
+        <br><em>Attempted:</em> {{ flag.attempted }}
+        <br><em>Suggested action:</em> {{ flag.suggestion }}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% for key, content in brief.sections.items() %}
+<section class="brief-section" id="section-{{ key }}">
+    <h2>{{ key | replace('_', ' ') | title }}</h2>
+    {{ content | safe }}
+</section>
+{% endfor %}

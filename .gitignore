@@ -11,6 +11,9 @@ venv/
 # Data (generated briefs — keep out of repo)
 data/
 
+# One-off scripts for data exploration (kept locally)
+scratch/
+
 # OS
 .DS_Store
 

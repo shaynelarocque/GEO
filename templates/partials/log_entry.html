@@ -1,0 +1,5 @@
+<div class="log-entry log-{{ entry.level }}">
+    <span class="log-time">{{ entry.timestamp.strftime('%H:%M:%S') }}</span>
+    <span class="log-level">[{{ entry.level | upper }}]</span>
+    <span class="log-msg">{{ entry.message }}</span>
+</div>

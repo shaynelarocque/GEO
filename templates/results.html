@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brief: {{ application.startup_name }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>{{ application.startup_name }}</h1>
+            <p class="subtitle">
+                <a href="/">&larr; New Application</a>
+                <span class="status-badge" id="status-badge">Processing...</span>
+            </p>
+        </header>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('log')">Agent Log</button>
+            <button class="tab" onclick="switchTab('brief')">Brief</button>
+            <button class="tab" onclick="switchTab('raw')">Raw Data</button>
+        </div>
+
+        <!-- Agent Log Tab (shown first so user sees activity) -->
+        <div id="tab-log" class="tab-content active">
+            <div id="log-stream"></div>
+        </div>
+
+        <!-- Brief Tab -->
+        <div id="tab-brief" class="tab-content" style="display:none">
+            <div id="brief-content">
+                <p class="loading">Agent is researching... Brief will appear when complete.</p>
+            </div>
+        </div>
+
+        <!-- Raw Data Tab -->
+        <div id="tab-raw" class="tab-content" style="display:none">
+            <div id="raw-content">
+                <p class="loading">Waiting for agent to complete...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script>
+        // ── Brief history ─────────────────────────────────────────────────
+        (function () {
+            var KEY = 'd3_brief_history';
+            var appId = '{{ app_id }}';
+            var name  = {{ application.startup_name | tojson }};
+
+            function upsert(status) {
+                var list = JSON.parse(localStorage.getItem(KEY) || '[]');
+                var idx  = list.findIndex(function (h) { return h.app_id === appId; });
+                if (idx >= 0) {
+                    list[idx].status = status;
+                } else {
+                    list.unshift({ app_id: appId, name: name, ts: Date.now(), status: status });
+                    list = list.slice(0, 30);
+                }
+                localStorage.setItem(KEY, JSON.stringify(list));
+            }
+
+            upsert('processing');                           // record immediately on load
+            window._historyMarkDone  = function () { upsert('complete'); };
+            window._historyMarkError = function () { upsert('error'); };
+        })();
+
+        // ── SSE stream ────────────────────────────────────────────────────
+        var logStream = document.getElementById('log-stream');
+        var es = new EventSource('/stream/{{ app_id }}');
+
+        es.addEventListener('log', function(e) {
+            logStream.innerHTML += e.data;
+            logStream.scrollTop = logStream.scrollHeight;
+        });
+
+        es.addEventListener('human_input', function(e) {
+            var data = JSON.parse(e.data);
+            var ctx = data.context ? '<p class="human-input-context">' + escapeHtml(data.context) + '</p>' : '';
+            var html =
+                '<div class="human-input-card" id="input-' + data.request_id + '">' +
+                    '<div class="human-input-header">Agent needs your input</div>' +
+                    '<p class="human-input-question">' + escapeHtml(data.question) + '</p>' +
+                    ctx +
+                    '<form class="human-input-form" onsubmit="submitHumanInput(event, \'' + data.request_id + '\')">' +
+                        '<textarea name="response" rows="3" placeholder="Type your answer..."></textarea>' +
+                        '<button type="submit" class="btn btn-primary">Send to Agent</button>' +
+                    '</form>' +
+                '</div>';
+            logStream.innerHTML += html;
+            logStream.scrollTop = logStream.scrollHeight;
+        });
+
+        es.addEventListener('done', function(e) {
+            es.close();
+
+            // Check actual status via brief API before marking badge
+            htmx.ajax('GET', '/api/brief/{{ app_id }}', {
+                target: '#brief-content',
+                swap: 'innerHTML'
+            }).then(function () {
+                var hasError = document.querySelector('#brief-content .status-error');
+                var badge = document.getElementById('status-badge');
+                if (hasError) {
+                    badge.textContent = 'Error';
+                    badge.classList.add('status-error-badge');
+                    window._historyMarkError && window._historyMarkError();
+                } else {
+                    badge.textContent = 'Complete';
+                    badge.classList.add('status-complete');
+                    window._historyMarkDone && window._historyMarkDone();
+                }
+            });
+
+            htmx.ajax('GET', '/api/raw/{{ app_id }}', {
+                target: '#raw-content',
+                swap: 'innerHTML'
+            });
+
+            switchTab('brief');
+        });
+
+        es.onerror = function() {
+            if (document.getElementById('status-badge').textContent === 'Complete') {
+                es.close();
+            }
+        };
+    </script>
+</body>
+</html>
