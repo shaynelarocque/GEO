@@ -25,7 +25,9 @@ _TOOLS_SECTION = """
 - `query_db(schema, sql)`: read-only SQL against the shared Postgres. Schemas: `general` (entity resolution; start here), `fed`, `cra`, `ab`. Refuses non-SELECT, blocks chaining, caps rows at 200, statement timeout 45s. See `database-cookbook.md`.
 
 **Web research:**
-- `WebSearch`, `WebFetch`, `research_fetch` (resilient with Wayback fallback and JS rendering).
+- `firecrawl_search(query, limit, purpose)`: **PRIMARY search tool.** Returns up to 10 results, each with title, URL, description, AND the page's main content already scraped as markdown. You do NOT need to fetch each result page separately. Try this first for any web question.
+- `WebSearch`: fallback only. Use when `firecrawl_search` returns an error.
+- `WebFetch`, `research_fetch`: for specific URLs (e.g. founding announcements, committee transcripts) when you have the URL in hand. `research_fetch` is the resilient option with Wayback fallback and JS rendering.
 
 **Reference library:**
 - `list_knowledge_files`, `read_knowledge_file`.

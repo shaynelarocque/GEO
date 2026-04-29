@@ -36,6 +36,58 @@ from app import knowledge, store as _store
 
 
 # ---------------------------------------------------------------------------
+# Firecrawl: web search with one-shot content scraping (primary search layer).
+# ---------------------------------------------------------------------------
+
+_FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v1/search"
+_FIRECRAWL_TIMEOUT_SECONDS = 60.0
+_FIRECRAWL_MAX_LIMIT = 10
+_FIRECRAWL_PER_RESULT_MARKDOWN_CAP = 6000  # chars; trims monster pages
+
+
+async def _firecrawl_search(query: str, limit: int) -> dict:
+    api_key = (os.environ.get("FIRECRAWL_API_KEY") or "").strip()
+    if not api_key:
+        return {"error": "FIRECRAWL_API_KEY not set"}
+    payload = {
+        "query": query,
+        "limit": max(1, min(limit, _FIRECRAWL_MAX_LIMIT)),
+        "scrapeOptions": {
+            "formats": ["markdown"],
+            "onlyMainContent": True,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_FIRECRAWL_TIMEOUT_SECONDS) as client:
+            resp = await client.post(
+                _FIRECRAWL_SEARCH_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            resp.raise_for_status()
+            body = resp.json()
+    except httpx.HTTPStatusError as e:
+        return {"error": f"firecrawl HTTP {e.response.status_code}: {e.response.text[:200]}"}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    if not body.get("success"):
+        return {"error": body.get("error") or "firecrawl returned success=false"}
+
+    results = []
+    for item in (body.get("data") or [])[:_FIRECRAWL_MAX_LIMIT]:
+        md = (item.get("markdown") or "")[:_FIRECRAWL_PER_RESULT_MARKDOWN_CAP]
+        results.append({
+            "title": item.get("title"),
+            "url": item.get("url"),
+            "description": item.get("description"),
+            "markdown": md,
+            "markdown_truncated": bool(item.get("markdown") and len(item["markdown"]) > _FIRECRAWL_PER_RESULT_MARKDOWN_CAP),
+        })
+    return {"results": results, "result_count": len(results)}
+
+
+# ---------------------------------------------------------------------------
 # Database access: read-only SQL against the hackathon-shared Postgres.
 # ---------------------------------------------------------------------------
 
@@ -903,10 +955,78 @@ def create_research_server(
         await emit_fn(app_id, args["message"], args.get("level", "info"))
         return {"content": [{"type": "text", "text": json.dumps({"logged": True})}]}
 
+    @tool(
+        "firecrawl_search",
+        "PRIMARY web search. Searches the web via Firecrawl and returns up to 10 results, "
+        "each with title, URL, description, AND the page's main content already scraped as "
+        "markdown. You do NOT need to fetch each result separately. Use this BEFORE WebSearch; "
+        "fall through to WebSearch only if firecrawl_search returns an error. Per-result "
+        "markdown is capped at 6,000 chars; if you need the full page, use research_fetch on "
+        "the URL.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default 5, max 10).",
+                    "minimum": 1,
+                    "maximum": 10,
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": "One sentence on what you're trying to find, for the audit trail.",
+                },
+            },
+            "required": ["query"],
+        },
+    )
+    async def firecrawl_search_tool(args: dict[str, Any]) -> dict[str, Any]:
+        query = args.get("query", "").strip()
+        limit = int(args.get("limit") or 5)
+        purpose = args.get("purpose", "")
+        if not query:
+            return {"content": [{"type": "text", "text": json.dumps({"error": "empty query"})}]}
+
+        await emit_fn(
+            app_id,
+            f"firecrawl_search: {query}",
+            "info",
+            f"purpose: {purpose}" if purpose else None,
+        )
+
+        result = await _firecrawl_search(query, limit)
+
+        raw_data.setdefault("firecrawl_searches", []).append({
+            "query": query,
+            "limit": limit,
+            "purpose": purpose,
+            "result_count": result.get("result_count"),
+            "error": result.get("error"),
+        })
+
+        if "error" in result:
+            await emit_fn(
+                app_id,
+                f"firecrawl_search error: {result['error']}. Fall back to WebSearch.",
+                "warning",
+            )
+        else:
+            urls = ", ".join((r.get("url") or "")[:80] for r in result.get("results", [])[:3])
+            await emit_fn(
+                app_id,
+                f"firecrawl_search returned {result['result_count']} result(s)",
+                "success",
+                urls or None,
+            )
+
+        return {"content": [{"type": "text", "text": json.dumps(result, default=str)}]}
+
     return create_sdk_mcp_server(
         name="geo-research",
         version="1.0.0",
         tools=[
+            firecrawl_search_tool,
             research_fetch_tool,
             query_db_tool,
             list_knowledge_files_tool,
