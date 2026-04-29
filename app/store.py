@@ -76,6 +76,28 @@ def get_audit_input(audit_id: str) -> ProgramAuditInput | None:
     return None
 
 
+def list_audits() -> list[dict]:
+    """Return every audit on disk, newest submitted first."""
+    out: list[dict] = []
+    if not _DATA_DIR.exists():
+        return out
+    for child in _DATA_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        ai = get_audit_input(child.name)
+        if ai is None:
+            continue
+        out.append({
+            "id": ai.id,
+            "program_name": ai.program_name,
+            "recipient_hint": ai.recipient_hint,
+            "submitted_at": ai.submitted_at.isoformat(),
+            "status": get_status(ai.id),
+        })
+    out.sort(key=lambda x: x["submitted_at"], reverse=True)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Log history  (in-memory while live, persisted to disk on completion)
 # ---------------------------------------------------------------------------

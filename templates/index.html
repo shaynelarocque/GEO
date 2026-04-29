@@ -13,13 +13,15 @@
             <p class="subtitle">Audit a federal program against its own stated promises, before it fails.</p>
         </header>
 
-        <div id="history-panel" class="history-panel" style="display:none">
-            <div class="history-header">
-                <span>Recent Audits</span>
-                <button class="history-clear-btn" onclick="clearBriefHistory()">Clear all</button>
+        <details id="history-dropdown" class="history-panel" ontoggle="loadHistory(this)">
+            <summary class="history-header">
+                <span>Past audits</span>
+                <span class="history-caret">▾</span>
+            </summary>
+            <div class="history-list" id="history-list">
+                <div class="history-empty">Loading…</div>
             </div>
-            <div class="history-list" id="history-list"></div>
-        </div>
+        </details>
 
         <form action="/submit" method="POST">
             <fieldset>

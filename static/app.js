@@ -1,3 +1,35 @@
+function loadHistory(detailsEl) {
+    if (!detailsEl.open || detailsEl.dataset.loaded) return;
+    detailsEl.dataset.loaded = '1';
+    var list = document.getElementById('history-list');
+    fetch('/api/history')
+        .then(function(r) { return r.json(); })
+        .then(function(items) {
+            if (!items.length) {
+                list.innerHTML = '<div class="history-empty">No past audits yet.</div>';
+                return;
+            }
+            list.innerHTML = items.map(function(a) {
+                var when = new Date(a.submitted_at).toLocaleString([], {
+                    month: 'short', day: 'numeric',
+                    hour: '2-digit', minute: '2-digit',
+                });
+                var dot = a.status === 'complete' ? '🟢'
+                        : a.status === 'error' ? '🔴'
+                        : a.status === 'processing' ? '🟡' : '⚪';
+                return '<a class="history-item" href="/results/' + encodeURIComponent(a.id) + '">'
+                     + '<span class="history-dot">' + dot + '</span>'
+                     + '<span class="history-name">' + escapeHtml(a.program_name) + '</span>'
+                     + '<span class="history-time">' + when + '</span>'
+                     + '</a>';
+            }).join('');
+        })
+        .catch(function() {
+            list.innerHTML = '<div class="history-empty">Failed to load history.</div>';
+            delete detailsEl.dataset.loaded;
+        });
+}
+
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(function(el) {
         el.style.display = 'none';

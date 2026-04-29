@@ -104,6 +104,11 @@ async def index(request: Request):
     )
 
 
+@app.get("/api/history")
+async def history():
+    return store.list_audits()
+
+
 @app.post("/submit")
 async def submit_audit(request: Request):
     form = await request.form()
