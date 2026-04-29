@@ -1,0 +1,11 @@
+.env
+.git
+.gitignore
+.claude/settings.local.json
+data/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.DS_Store

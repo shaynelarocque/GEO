@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "D3 Briefing Agent",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["app.main:app", "--reload"],
+      "port": 8000,
+      "autoPort": true
+    }
+  ]
+}

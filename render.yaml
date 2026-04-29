@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: briefbot
+    runtime: docker
+    plan: free
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: AUTH_USERNAME
+        sync: false
+      - key: AUTH_PASSWORD
+        sync: false
+    healthCheckPath: /health
