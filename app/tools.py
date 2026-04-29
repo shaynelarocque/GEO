@@ -19,20 +19,100 @@ Built-in SDK tools (configured in agent.py, not defined here):
 """
 
 import asyncio
+import datetime as _dt
+import decimal
 import json
+import os
 import re
 import uuid as uuid_mod
 from typing import Any, Callable, Awaitable
 from urllib.parse import urlparse, urljoin
 
 import httpx
+import psycopg
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from app import knowledge, store as _store
 
 
 # ---------------------------------------------------------------------------
-# Shared HTTP headers — mimic a real browser to avoid bot blocks
+# Database access: read-only SQL against the hackathon-shared Postgres.
+# ---------------------------------------------------------------------------
+
+_KNOWN_SCHEMAS = {"cra", "fed", "ab", "general"}
+_SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+_QUERY_ROW_LIMIT = 200
+_QUERY_TIMEOUT_MS = 45_000
+
+
+def _strip_sql_comments(sql: str) -> str:
+    return _SQL_COMMENT.sub("", sql)
+
+
+def _validate_select_only(sql: str) -> str | None:
+    """Return None if SQL is acceptable, else a human-readable rejection reason."""
+    bare = _strip_sql_comments(sql).strip().rstrip(";").strip()
+    if not bare:
+        return "empty query"
+    first = bare.split(None, 1)[0].lower()
+    if first not in {"select", "with"}:
+        return f"only SELECT or WITH … SELECT queries are allowed (got: {first!r})"
+    # Reject statement chaining; a semicolon followed by more SQL.
+    # We've already rstripped a trailing semicolon, so any remaining `;`
+    # in the body indicates a chained statement.
+    if ";" in bare:
+        return "statement chaining is not allowed; submit one query per call"
+    return None
+
+
+def _row_to_jsonable(row: tuple, cols: list[str]) -> dict:
+    out = {}
+    for col, val in zip(cols, row):
+        if isinstance(val, decimal.Decimal):
+            out[col] = float(val) if val == val.to_integral_value() and abs(val) < 1e15 else str(val)
+        elif isinstance(val, (_dt.date, _dt.datetime)):
+            out[col] = val.isoformat()
+        elif isinstance(val, (bytes, bytearray, memoryview)):
+            out[col] = "<binary>"
+        else:
+            out[col] = val
+    return out
+
+
+async def _run_select(sql: str) -> dict:
+    """Execute a validated SELECT and return {columns, rows, row_count, truncated}.
+
+    Wrapped in run_in_executor so the synchronous psycopg call doesn't block
+    the FastAPI event loop.
+    """
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        return {"error": "DATABASE_URL not configured"}
+
+    def _do_query() -> dict:
+        with psycopg.connect(dsn, connect_timeout=10) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SET LOCAL statement_timeout = {_QUERY_TIMEOUT_MS}")
+                cur.execute(sql)
+                if cur.description is None:
+                    return {"error": "query returned no result set"}
+                cols = [d.name for d in cur.description]
+                # Fetch one extra row to detect truncation.
+                rows = cur.fetchmany(_QUERY_ROW_LIMIT + 1)
+                truncated = len(rows) > _QUERY_ROW_LIMIT
+                rows = rows[:_QUERY_ROW_LIMIT]
+                return {
+                    "columns": cols,
+                    "rows": [_row_to_jsonable(r, cols) for r in rows],
+                    "row_count": len(rows),
+                    "truncated": truncated,
+                }
+
+    return await asyncio.get_running_loop().run_in_executor(None, _do_query)
+
+
+# ---------------------------------------------------------------------------
+# Shared HTTP headers. Mimic a real browser to avoid bot blocks
 # ---------------------------------------------------------------------------
 
 BROWSER_HEADERS = {
@@ -47,7 +127,7 @@ BROWSER_HEADERS = {
 
 
 # ---------------------------------------------------------------------------
-# MCP server factory — creates per-request tools with closures over state
+# MCP server factory. Creates per-request tools with closures over state
 # ---------------------------------------------------------------------------
 
 EmitFn = Callable[[str, str, str, str | None], Awaitable[None]]
@@ -55,8 +135,7 @@ EmitFn = Callable[[str, str, str, str | None], Awaitable[None]]
 
 def create_research_server(
     app_id: str,
-    brief_sections: dict[str, str],
-    human_review_flags: list[dict],
+    audit_state: dict,
     raw_data: dict,
     emit_fn: EmitFn,
     scratch_notes: dict[str, str],
@@ -65,14 +144,27 @@ def create_research_server(
     """Create a per-request MCP server with tools that close over request state.
 
     Args:
-        app_id: The application ID for this research session.
-        brief_sections: Mutable dict where brief sections are stored as they're written.
-        human_review_flags: Mutable list where flags are appended.
-        raw_data: Mutable dict tracking fetched URLs, self-assessments, and tool calls.
+        app_id: The audit ID for this research session.
+        audit_state: Mutable dict matching ProgramAudit shape. Tools mutate this
+            in place: goal_anchor, lenses, drafts, synthesis, reasoning_trail, flags.
+        raw_data: Mutable dict tracking fetched URLs, tool calls, db queries.
         emit_fn: Async callable(app_id, message, level, details=None) for SSE logging.
         scratch_notes: Mutable dict for agent's intermediate research notes.
         research_plan: Mutable dict for agent's research plan.
     """
+    # Ensure the expected substructures exist; the caller may pass an empty dict.
+    audit_state.setdefault("goal_anchor", None)
+    audit_state.setdefault("lenses", {})
+    audit_state.setdefault("drafts", [])
+    audit_state.setdefault("synthesis", None)
+    audit_state.setdefault("reasoning_trail", [])
+    audit_state.setdefault("flags", [])
+
+    _LENS_KEYS = {"stated_objectives", "budget", "adoption", "vendor"}
+    _PHASE_KEYS = _LENS_KEYS | {"goal_anchor", "synthesis", "follow_up", "other"}
+    _VERDICTS = {"green", "yellow", "red", "insufficient_evidence"}
+    _TIERS = {"strong", "moderate", "limited", "n/a"}
+    _INSTRUMENTS = {"atip", "order_paper_question", "committee_followup"}
 
     @tool(
         "research_fetch",
@@ -83,7 +175,7 @@ def create_research_server(
         "Jina Reader JS-rendering fallback for SPAs, and sitemap discovery. "
         "Returns content, status, detected issues, archive data, and a structured "
         "nav_links array of {text, url} objects found on the page. Use nav_links "
-        "to decide which sub-pages are worth exploring — fetch the ones relevant "
+        "to decide which sub-pages are worth exploring; fetch the ones relevant "
         "to your research question, skip the rest. Content truncated to 15,000 chars.",
         {"url": str},
     )
@@ -110,7 +202,7 @@ def create_research_server(
         elif "original_unreachable" in issues and wb.get("found"):
             await emit_fn(
                 app_id,
-                f"Site unreachable — Wayback snapshot found ({wb['archived_at']}): {url}",
+                f"Site unreachable; Wayback snapshot found ({wb['archived_at']}): {url}",
                 "warning",
                 content_preview,
             )
@@ -118,7 +210,7 @@ def create_research_server(
             issue_labels = ", ".join(issues) if issues else "none"
             await emit_fn(
                 app_id,
-                f"Fetched {url} — {result.get('content_length', 0)} chars "
+                f"Fetched {url}; {result.get('content_length', 0)} chars "
                 f"[issues: {issue_labels}] + Wayback archive ({wb['archived_at']})",
                 "success",
                 content_preview,
@@ -131,7 +223,7 @@ def create_research_server(
             source_label = f" [{source}]" if source else ""
             await emit_fn(
                 app_id,
-                f"Fetched {url} — {result.get('content_length', 0)} chars{source_label}{issue_labels}",
+                f"Fetched {url}; {result.get('content_length', 0)} chars{source_label}{issue_labels}",
                 "success",
                 content_preview,
             )
@@ -181,7 +273,7 @@ def create_research_server(
             summary_lines = "\n".join(f"  - {k}: {v}" for k, v in available.items())
             await emit_fn(
                 app_id,
-                f"Knowledge file not found: '{filename}' — showing available files",
+                f"Knowledge file not found: '{filename}'; showing available files",
                 "warning",
             )
             result = {
@@ -192,55 +284,112 @@ def create_research_server(
             }
         return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
+    # ------------------------------------------------------------------
+    # Reasoning surface: self_assess + record_pivot. Both append to
+    # audit_state.reasoning_trail. The /stream endpoint surfaces these
+    # to the frontend reasoning lane as 'reasoning' SSE events.
+    # ------------------------------------------------------------------
+
+    def _push_reasoning(kind: str, phase: str, headline: str, detail: str | None = None):
+        item = {
+            "id": str(uuid_mod.uuid4()),
+            "kind": kind,
+            "phase": phase,
+            "headline": headline,
+            "detail": detail,
+        }
+        audit_state["reasoning_trail"].append(item)
+        return item
+
     @tool(
         "self_assess",
-        "Self-assess the quality of your most recent research step. Call this "
-        "after each major step (website analysis, each founder profile, scoring). "
-        "Provide a confidence score and reasoning. If confidence < 0.6, retry or "
-        "flag for human review. MANDATORY after every major step.",
+        "Record a reasoning checkpoint. Call after each major step (goal extraction, "
+        "each lens, synthesis) and any time you reconsider an earlier judgment. The "
+        "headline is one sentence the reviewer will read in the reasoning lane; "
+        "detail is the longer reasoning. Use 'phase' to tag which audit phase this "
+        "self-assessment belongs to so the lane can group items per lens.",
         {
             "type": "object",
             "properties": {
-                "step_name": {"type": "string", "description": "Name of the step just completed"},
-                "confidence": {"type": "number", "description": "Confidence score from 0.0 to 1.0"},
-                "reasoning": {"type": "string", "description": "Why this confidence level?"},
-                "action": {
+                "phase": {
                     "type": "string",
-                    "enum": ["proceed", "retry", "flag_human_review"],
-                    "description": "What to do next based on this assessment",
+                    "enum": sorted(_PHASE_KEYS),
+                    "description": "Which phase this self-assessment is about.",
+                },
+                "headline": {
+                    "type": "string",
+                    "description": "One-sentence summary of what you're concluding (≤ 140 chars).",
+                },
+                "detail": {
+                    "type": "string",
+                    "description": "Longer reasoning. Cite the evidence that drove the conclusion.",
                 },
             },
-            "required": ["step_name", "confidence", "reasoning", "action"],
+            "required": ["phase", "headline"],
         },
     )
     async def self_assess_tool(args: dict[str, Any]) -> dict[str, Any]:
-        raw_data["self_assessments"].append(args)
-        confidence = args["confidence"]
-        step = args["step_name"]
-        action = args["action"]
-        level = "success" if confidence >= 0.6 else "warning"
-        await emit_fn(
-            app_id,
-            f"Self-assessment [{step}]: confidence={confidence:.2f}, action={action}",
-            level,
-            args["reasoning"],
-        )
-        result = {"acknowledged": True, "action": action}
-        return {"content": [{"type": "text", "text": json.dumps(result)}]}
+        phase = args["phase"]
+        if phase not in _PHASE_KEYS:
+            return {"content": [{"type": "text", "text": json.dumps({"error": f"unknown phase {phase!r}"})}]}
+        headline = args["headline"]
+        detail = args.get("detail")
+        _push_reasoning("self_assess", phase, headline, detail)
+        await emit_fn(app_id, f"Self-assess [{phase}]: {headline}", "info", detail)
+        return {"content": [{"type": "text", "text": json.dumps({"recorded": True})}]}
 
     @tool(
-        "flag_human_review",
-        "Flag an item for human review. Use when data is unavailable, ambiguous, "
-        "or you cannot make a confident assessment after exhausting research. "
-        "Creates a visible flag in the brief. "
-        "Severity: critical = data integrity/blocker, high = important gap, "
-        "medium = notable concern, low = minor note.",
+        "record_pivot",
+        "Record a direction change. Call this when you abandon an instrument, "
+        "back off a verdict, switch the lens you're working on, or pick a "
+        "different research path. The reasoning lane surfaces pivots prominently; "
+        "they are the high-value content the audience watches for. Do NOT call "
+        "this for routine tool selection; only when you reconsider a meaningful "
+        "earlier choice.",
         {
             "type": "object",
             "properties": {
-                "section": {"type": "string", "description": "Which brief section this flag belongs to"},
+                "from_phase": {
+                    "type": "string",
+                    "enum": sorted(_PHASE_KEYS),
+                    "description": "The phase or lens you were working in.",
+                },
+                "to_phase": {
+                    "type": "string",
+                    "enum": sorted(_PHASE_KEYS),
+                    "description": "The phase or lens you are moving to.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "What changed your mind. One or two sentences.",
+                },
+            },
+            "required": ["from_phase", "to_phase", "reason"],
+        },
+    )
+    async def record_pivot_tool(args: dict[str, Any]) -> dict[str, Any]:
+        from_phase = args["from_phase"]
+        to_phase = args["to_phase"]
+        reason = args["reason"]
+        if from_phase not in _PHASE_KEYS or to_phase not in _PHASE_KEYS:
+            return {"content": [{"type": "text", "text": json.dumps({"error": "unknown phase key"})}]}
+        headline = f"{from_phase} → {to_phase}"
+        _push_reasoning("pivot", to_phase, headline, reason)
+        await emit_fn(app_id, f"Pivot: {headline}; {reason}", "warning")
+        return {"content": [{"type": "text", "text": json.dumps({"recorded": True})}]}
+
+    @tool(
+        "flag_human_review",
+        "Flag a lingering concern that you cannot resolve through more research. "
+        "Use sparingly; for gaps that warrant an accountability instrument, call "
+        "add_draft instead. Severity: critical = data integrity / blocker, "
+        "high = important gap, medium = notable concern, low = minor note.",
+        {
+            "type": "object",
+            "properties": {
+                "section": {"type": "string", "description": "Which lens or phase this flag belongs to"},
                 "issue": {"type": "string", "description": "What the problem is"},
-                "attempted": {"type": "string", "description": "What you tried before flagging (list every URL attempted)"},
+                "attempted": {"type": "string", "description": "What you tried before flagging"},
                 "suggestion": {"type": "string", "description": "Suggested action for the human reviewer"},
                 "severity": {
                     "type": "string",
@@ -252,119 +401,241 @@ def create_research_server(
         },
     )
     async def flag_human_review_tool(args: dict[str, Any]) -> dict[str, Any]:
-        human_review_flags.append(args)
+        audit_state["flags"].append(args)
         severity = args.get("severity", "medium")
         await emit_fn(
             app_id,
-            f"HUMAN REVIEW [{severity.upper()}] [{args['section']}]: {args['issue']}",
+            f"FLAG [{severity.upper()}] [{args['section']}]: {args['issue']}",
             "warning",
         )
         return {"content": [{"type": "text", "text": json.dumps({"flagged": True})}]}
 
-    @tool(
-        "emit_brief_section",
-        "Emit a completed section of the brief. Call as you complete each "
-        "section so progress is visible in real time.",
-        {
-            "type": "object",
-            "properties": {
-                "section_key": {
-                    "type": "string",
-                    "enum": [
-                        "synthesis",
-                        "founder_profiles",
-                        "sdg_coherence",
-                        "competitive_context",
-                        "scorecard",
-                        "stream_classification",
-                        "key_risks",
-                        "questions_ops",
-                        "questions_panelists",
-                    ],
-                    "description": "The section identifier",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The section content as markdown with citations",
-                },
-            },
-            "required": ["section_key", "content"],
-        },
-    )
-    async def emit_brief_section_tool(args: dict[str, Any]) -> dict[str, Any]:
-        key = args["section_key"]
-        brief_sections[key] = args["content"]
-        await emit_fn(app_id, f"Brief section completed: {key}", "success")
-        result = {"saved": True, "section_key": key}
-        return {"content": [{"type": "text", "text": json.dumps(result)}]}
-
     # ------------------------------------------------------------------
-    # Improvement 1: Section Revision & Backtracking
+    # Structured audit output: goal anchor, lenses, synthesis, drafts.
     # ------------------------------------------------------------------
 
     @tool(
-        "update_brief_section",
-        "Revise a previously emitted brief section. Use this when later research "
-        "contradicts, enriches, or materially changes an earlier section. Requires "
-        "a reason so the revision is auditable. The revision is logged and the "
-        "old content is preserved in the audit trail.",
+        "set_goal_anchor",
+        "Write the program's accountability anchor: the program's own stated "
+        "objectives, original budget, success metrics, timeline, and the sources "
+        "you used. Call this once after goal extraction. Cite at least two "
+        "primary_gov sources (see knowledge:provenance).",
         {
             "type": "object",
             "properties": {
-                "section_key": {
-                    "type": "string",
-                    "enum": [
-                        "synthesis",
-                        "founder_profiles",
-                        "sdg_coherence",
-                        "competitive_context",
-                        "scorecard",
-                        "stream_classification",
-                        "key_risks",
-                        "questions_ops",
-                        "questions_panelists",
-                    ],
-                    "description": "The section to revise",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The updated section content as markdown with citations",
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "Why this section is being revised (e.g. 'Found contradicting data about co-founder background')",
+                "stated_objectives": {"type": "string", "description": "1-2 paragraphs of mission language quoted from founding doc, with citation markers."},
+                "original_budget": {"type": "string", "description": "Human-readable: '$X over Y years from Department of Z, originally committed YYYY-MM-DD'."},
+                "success_metrics": {"type": "array", "items": {"type": "string"}, "description": "List of measurable targets the program committed to."},
+                "timeline": {"type": "string", "description": "Original start, end, key milestones."},
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "claim": {"type": "string"},
+                            "source": {"type": "string"},
+                            "tier": {"type": "string"},
+                            "excerpt": {"type": "string"},
+                        },
+                        "required": ["claim", "source", "tier"],
+                    },
+                    "description": "Evidence list scored by provenance tier.",
                 },
             },
-            "required": ["section_key", "content", "reason"],
+            "required": ["stated_objectives", "sources"],
         },
     )
-    async def update_brief_section_tool(args: dict[str, Any]) -> dict[str, Any]:
-        key = args["section_key"]
-        reason = args["reason"]
-        old_content = brief_sections.get(key)
+    async def set_goal_anchor_tool(args: dict[str, Any]) -> dict[str, Any]:
+        audit_state["goal_anchor"] = {
+            "stated_objectives": args.get("stated_objectives", ""),
+            "original_budget": args.get("original_budget"),
+            "success_metrics": args.get("success_metrics", []),
+            "timeline": args.get("timeline"),
+            "sources": args.get("sources", []),
+        }
+        await emit_fn(app_id, "Goal anchor written.", "success")
+        _push_reasoning("decision", "goal_anchor", "Goal anchor recorded.", None)
+        return {"content": [{"type": "text", "text": json.dumps({"saved": True})}]}
 
-        if old_content is None:
-            # No previous version — treat as first write
-            brief_sections[key] = args["content"]
-            await emit_fn(app_id, f"Brief section completed: {key} (no prior version to revise)", "success")
-            return {"content": [{"type": "text", "text": json.dumps({"saved": True, "section_key": key, "was_revision": False})}]}
+    @tool(
+        "set_lens",
+        "Write or revise a lens. Calling set_lens twice on the same key REVISES "
+        "the lens; the previous verdict is captured as a backtrack in the "
+        "reasoning trail. Required structure: verdict, evidence_tier, summary "
+        "(one sentence ≤140 chars), 3-5 key_numbers, rationale_md, "
+        "counter_argument_md. For the budget lens, also include budget_tranches "
+        "as a time-ordered list of dollar amounts so the budget ribbon can render.",
+        {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "enum": sorted(_LENS_KEYS), "description": "Which lens."},
+                "verdict": {"type": "string", "enum": sorted(_VERDICTS), "description": "green / yellow / red / insufficient_evidence."},
+                "evidence_tier": {"type": "string", "enum": sorted(_TIERS), "description": "strong / moderate / limited / n/a (when verdict is insufficient_evidence)."},
+                "summary": {"type": "string", "description": "One sentence ≤140 chars; appears in the lens header card."},
+                "key_numbers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "value": {"type": "string"},
+                            "sublabel": {"type": "string"},
+                        },
+                        "required": ["label", "value"],
+                    },
+                    "description": "3-5 quantitative anchors. Examples: 'Original budget: $40M', 'Latest authority: $300M', 'Adoption: <5%'.",
+                },
+                "rationale_md": {"type": "string", "description": "Markdown body with citations: how you read the evidence."},
+                "counter_argument_md": {"type": "string", "description": "Markdown: the strongest argument a defender of the program could make against your rationale."},
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "claim": {"type": "string"},
+                            "source": {"type": "string"},
+                            "tier": {"type": "string"},
+                            "excerpt": {"type": "string"},
+                        },
+                        "required": ["claim", "source", "tier"],
+                    },
+                    "description": "Evidence list (optional but encouraged).",
+                },
+                "budget_tranches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "description": "e.g. 'Founding commitment', 'Amendment 2', 'Latest authority'"},
+                            "date": {"type": "string", "description": "ISO date (YYYY-MM-DD) of the tranche."},
+                            "amount_cad": {"type": "number", "description": "Dollar amount in CAD."},
+                            "note": {"type": "string"},
+                            "source": {"type": "string", "description": "Citation marker."},
+                        },
+                        "required": ["label", "amount_cad"],
+                    },
+                    "description": "ONLY for the budget lens. Time-ordered tranches; rendered as the ribbon timeline.",
+                },
+            },
+            "required": ["key", "verdict", "evidence_tier", "summary", "key_numbers", "rationale_md", "counter_argument_md"],
+        },
+    )
+    async def set_lens_tool(args: dict[str, Any]) -> dict[str, Any]:
+        key = args["key"]
+        if key not in _LENS_KEYS:
+            return {"content": [{"type": "text", "text": json.dumps({"error": f"unknown lens key {key!r}"})}]}
+        if args["verdict"] not in _VERDICTS:
+            return {"content": [{"type": "text", "text": json.dumps({"error": f"unknown verdict {args['verdict']!r}"})}]}
+        if args["evidence_tier"] not in _TIERS:
+            return {"content": [{"type": "text", "text": json.dumps({"error": f"unknown evidence_tier {args['evidence_tier']!r}"})}]}
 
-        # Track the revision in raw_data
-        raw_data.setdefault("revision_history", []).append({
-            "section_key": key,
-            "reason": reason,
-            "old_content_length": len(old_content),
-            "new_content_length": len(args["content"]),
-        })
+        previous = audit_state["lenses"].get(key)
+        is_revision = previous is not None
+        revision_count = (previous.get("revision_count", 0) + 1) if previous else 0
 
-        brief_sections[key] = args["content"]
+        lens = {
+            "key": key,
+            "verdict": args["verdict"],
+            "evidence_tier": args["evidence_tier"],
+            "summary": args["summary"],
+            "key_numbers": args.get("key_numbers", []),
+            "rationale_md": args["rationale_md"],
+            "counter_argument_md": args["counter_argument_md"],
+            "evidence": args.get("evidence", []),
+            "budget_tranches": args.get("budget_tranches", []) if key == "budget" else [],
+            "revision_count": revision_count,
+        }
+        audit_state["lenses"][key] = lens
+
+        if is_revision:
+            old_v = previous.get("verdict")
+            new_v = args["verdict"]
+            if old_v != new_v:
+                _push_reasoning(
+                    "backtrack",
+                    key,
+                    f"{key}: verdict changed {old_v} → {new_v}",
+                    f"Revision #{revision_count}.",
+                )
+                await emit_fn(app_id, f"Lens REVISED: {key} verdict {old_v} → {new_v}", "warning")
+            else:
+                await emit_fn(app_id, f"Lens updated: {key} (verdict unchanged: {new_v})", "info")
+        else:
+            await emit_fn(app_id, f"Lens written: {key} ({args['verdict']}, {args['evidence_tier']})", "success")
+
+        return {"content": [{"type": "text", "text": json.dumps({"saved": True, "key": key, "revision_count": revision_count})}]}
+
+    @tool(
+        "set_synthesis",
+        "Write the cross-lens synthesis. Call this last, after every lens has "
+        "been set. The synthesis carries an overall verdict, an overall evidence "
+        "tier, a one-sentence summary, and a markdown rationale that ties the "
+        "lens verdicts together.",
+        {
+            "type": "object",
+            "properties": {
+                "overall_verdict": {"type": "string", "enum": sorted(_VERDICTS)},
+                "overall_tier": {"type": "string", "enum": sorted(_TIERS)},
+                "summary": {"type": "string", "description": "One sentence ≤200 chars."},
+                "rationale_md": {"type": "string", "description": "Markdown rationale."},
+            },
+            "required": ["overall_verdict", "overall_tier", "summary", "rationale_md"],
+        },
+    )
+    async def set_synthesis_tool(args: dict[str, Any]) -> dict[str, Any]:
+        if args["overall_verdict"] not in _VERDICTS or args["overall_tier"] not in _TIERS:
+            return {"content": [{"type": "text", "text": json.dumps({"error": "unknown verdict or tier"})}]}
+        audit_state["synthesis"] = {
+            "overall_verdict": args["overall_verdict"],
+            "overall_tier": args["overall_tier"],
+            "summary": args["summary"],
+            "rationale_md": args["rationale_md"],
+        }
+        await emit_fn(app_id, f"Synthesis written: {args['overall_verdict']} / {args['overall_tier']}", "success")
+        _push_reasoning("decision", "synthesis", "Synthesis recorded.", args["summary"])
+        return {"content": [{"type": "text", "text": json.dumps({"saved": True})}]}
+
+    @tool(
+        "add_draft",
+        "Append a drafted accountability instrument. Use when a lens hits "
+        "insufficient_evidence at low tier and the gap warrants an ATIP request, "
+        "Order Paper question, or committee follow-up. Address by ROLE, never by "
+        "name. The body should be ready for a human reviewer to edit and submit. "
+        "The tool drafts; the human decides; nothing here gets sent.",
+        {
+            "type": "object",
+            "properties": {
+                "instrument": {"type": "string", "enum": sorted(_INSTRUMENTS)},
+                "addressed_to": {"type": "string", "description": "Role (e.g. 'Health Canada ATIP Coordinator'). Never a person's name."},
+                "triggered_by_lens": {"type": "string", "enum": sorted(_PHASE_KEYS)},
+                "triggered_by_gap": {"type": "string", "description": "Short description of the gap this instrument is meant to close."},
+                "body": {"type": "string", "description": "Full draft text in markdown."},
+            },
+            "required": ["instrument", "addressed_to", "triggered_by_lens", "triggered_by_gap", "body"],
+        },
+    )
+    async def add_draft_tool(args: dict[str, Any]) -> dict[str, Any]:
+        draft = {
+            "id": str(uuid_mod.uuid4()),
+            "instrument": args["instrument"],
+            "addressed_to": args["addressed_to"],
+            "triggered_by_lens": args["triggered_by_lens"],
+            "triggered_by_gap": args["triggered_by_gap"],
+            "body": args["body"],
+        }
+        audit_state["drafts"].append(draft)
         await emit_fn(
             app_id,
-            f"Brief section REVISED: {key} — {reason}",
-            "warning",
-            f"Previous version was {len(old_content)} chars, new version is {len(args['content'])} chars.",
+            f"DRAFT [{args['instrument']}]: addressed to {args['addressed_to']} (gap: {args['triggered_by_gap']})",
+            "success",
         )
-        return {"content": [{"type": "text", "text": json.dumps({"saved": True, "section_key": key, "was_revision": True, "reason": reason})}]}
+        _push_reasoning(
+            "decision",
+            args["triggered_by_lens"],
+            f"Drafted {args['instrument']}: {args['triggered_by_gap']}",
+            args["body"][:300],
+        )
+        return {"content": [{"type": "text", "text": json.dumps({"saved": True, "draft_id": draft["id"]})}]}
 
     # ------------------------------------------------------------------
     # Improvement 2: Mid-Run Human Interaction
@@ -375,8 +646,8 @@ def create_research_server(
         "Pause and ask a human observer a question in real time. The question "
         "appears in the Agent Log tab and the observer can type a response. "
         "Use this when you need clarification that would materially change your "
-        "research direction — e.g. 'The founder's LinkedIn shows two different "
-        "companies — which is the current venture?' Use flag_human_review instead "
+        "research direction; e.g. 'The founder's LinkedIn shows two different "
+        "companies; which is the current venture?' Use flag_human_review instead "
         "for post-hoc concerns that don't block your current work. "
         "Times out after 5 minutes if no response.",
         {
@@ -443,7 +714,7 @@ def create_research_server(
                 },
                 "content": {
                     "type": "string",
-                    "description": "The note content (any format — text, markdown, structured data)",
+                    "description": "The note content (any format; text, markdown, structured data)",
                 },
             },
             "required": ["key", "content"],
@@ -495,7 +766,7 @@ def create_research_server(
         "save_plan",
         "Save or update your research plan. Call this early to structure your "
         "approach, and again whenever your strategy changes (e.g. after discovering "
-        "something unexpected). The plan is your working memory — check it with "
+        "something unexpected). The plan is your working memory; check it with "
         "read_plan to stay on track.",
         {
             "type": "object",
@@ -537,6 +808,81 @@ def create_research_server(
         })}]}
 
     @tool(
+        "query_db",
+        "Run a read-only SQL query against the hackathon-shared Postgres. "
+        "Schemas available: 'general' (cross-dataset entity resolution; usually start here), "
+        "'fed' (federal grants and contributions, 1.275M rows), 'cra' (T3010 charity filings + "
+        "pre-computed analyses), 'ab' (Alberta open data). Only SELECT and WITH…SELECT are "
+        "allowed; statement chaining is rejected; rows are capped at 200; statement timeout "
+        "is 15 seconds. Returns columns + rows + truncated flag. See knowledge:database-cookbook "
+        "for ready-to-run queries. The 'schema' field is informational; your SQL should use "
+        "fully-qualified table names like fed.grants_contributions or general.entity_golden_records.",
+        {
+            "type": "object",
+            "properties": {
+                "schema": {
+                    "type": "string",
+                    "enum": ["general", "fed", "cra", "ab"],
+                    "description": "The primary schema this query targets (informational, used for logging).",
+                },
+                "sql": {
+                    "type": "string",
+                    "description": "A single SELECT or WITH…SELECT statement. Use fully-qualified table names.",
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": "One sentence on what this query is meant to surface, for the audit trail.",
+                },
+            },
+            "required": ["schema", "sql", "purpose"],
+        },
+    )
+    async def query_db_tool(args: dict[str, Any]) -> dict[str, Any]:
+        schema = args.get("schema", "")
+        sql = args.get("sql", "")
+        purpose = args.get("purpose", "")
+
+        if schema not in _KNOWN_SCHEMAS:
+            return {"content": [{"type": "text", "text": json.dumps({
+                "error": f"unknown schema {schema!r}; expected one of {sorted(_KNOWN_SCHEMAS)}"
+            })}]}
+
+        rejection = _validate_select_only(sql)
+        if rejection:
+            await emit_fn(app_id, f"query_db rejected: {rejection}", "warning", sql)
+            return {"content": [{"type": "text", "text": json.dumps({"error": rejection})}]}
+
+        await emit_fn(app_id, f"query_db [{schema}]: {purpose or '(no purpose given)'}", "info", sql)
+
+        try:
+            result = await _run_select(sql)
+        except psycopg.Error as e:
+            await emit_fn(app_id, f"query_db error: {e}", "error", sql)
+            return {"content": [{"type": "text", "text": json.dumps({"error": str(e)})}]}
+
+        if "error" in result:
+            await emit_fn(app_id, f"query_db error: {result['error']}", "error", sql)
+        else:
+            trunc = " (truncated)" if result.get("truncated") else ""
+            await emit_fn(
+                app_id,
+                f"query_db returned {result['row_count']} row(s){trunc}",
+                "success",
+            )
+
+        # Track in raw data for the audit trail.
+        raw_data.setdefault("db_queries", []).append({
+            "schema": schema,
+            "purpose": purpose,
+            "sql": sql,
+            "row_count": result.get("row_count"),
+            "truncated": result.get("truncated", False),
+            "error": result.get("error"),
+        })
+
+        return {"content": [{"type": "text", "text": json.dumps(result, default=str)}]}
+
+    @tool(
         "emit_log",
         "Send a log message that appears in the Agent Log tab in real time. "
         "Use to narrate your research process.",
@@ -558,16 +904,20 @@ def create_research_server(
         return {"content": [{"type": "text", "text": json.dumps({"logged": True})}]}
 
     return create_sdk_mcp_server(
-        name="d3-research",
+        name="geo-research",
         version="1.0.0",
         tools=[
             research_fetch_tool,
+            query_db_tool,
             list_knowledge_files_tool,
             read_knowledge_file_tool,
             self_assess_tool,
+            record_pivot_tool,
             flag_human_review_tool,
-            emit_brief_section_tool,
-            update_brief_section_tool,
+            set_goal_anchor_tool,
+            set_lens_tool,
+            set_synthesis_tool,
+            add_draft_tool,
             request_human_input_tool,
             save_note_tool,
             read_notes_tool,
@@ -884,7 +1234,7 @@ async def fetch_url(url: str) -> dict:
     """Fetch a URL with multiple fallback strategies.
 
     Strategy order:
-    1. GitHub API (for github.com URLs — richer than HTML scraping)
+    1. GitHub API (for github.com URLs; richer than HTML scraping)
     2. Normal fetch with browser User-Agent
        a. Content-type check: skip binary/PDF gracefully
        b. SPA content extraction (meta, __NEXT_DATA__, nav links)
@@ -935,7 +1285,7 @@ async def fetch_url(url: str) -> dict:
                     "content": (
                         f"[BINARY FILE: {content_type}] This URL points to a {ext.upper()} file "
                         f"that cannot be read as text. Try using the built-in WebFetch tool "
-                        f"instead — it can read PDFs natively. If that also fails, flag for "
+                        f"instead; it can read PDFs natively. If that also fails, flag for "
                         f"human review so a team member can examine it manually."
                     ),
                     "content_length": 0,
@@ -981,7 +1331,7 @@ async def fetch_url(url: str) -> dict:
                 except (json.JSONDecodeError, KeyError):
                     pass
 
-            # RSC payload (Next.js App Router — modern apps won't have __NEXT_DATA__)
+            # RSC payload (Next.js App Router; modern apps won't have __NEXT_DATA__)
             if "self.__next_f" in raw_html:
                 is_spa = True
                 rsc_text = _extract_rsc_payload(raw_html)
@@ -990,7 +1340,7 @@ async def fetch_url(url: str) -> dict:
                         rsc_text = rsc_text[:5000] + "\n[...truncated]"
                     extracted_parts.append(f"Page Content (Next.js App Router / RSC):\n{rsc_text}")
 
-            # Navigation links — extract as structured data AND embed in content
+            # Navigation links; extract as structured data AND embed in content
             raw_nav_links = re.findall(
                 r'<a\s+[^>]*href=["\'](.*?)["\'][^>]*>(.*?)</a>',
                 raw_html, re.DOTALL | re.IGNORECASE,
@@ -1064,7 +1414,7 @@ async def fetch_url(url: str) -> dict:
                 )
 
             if len(combined) > 15000:
-                combined = combined[:15000] + "\n\n[TRUNCATED — content exceeded 15,000 characters]"
+                combined = combined[:15000] + "\n\n[TRUNCATED; content exceeded 15,000 characters]"
 
             result = {
                 "url": str(resp.url),
@@ -1103,7 +1453,7 @@ async def fetch_url(url: str) -> dict:
 
             return result
 
-        # ── Strategy 3: Fetch failed entirely — try Wayback Machine ────────
+        # ── Strategy 3: Fetch failed entirely; try Wayback Machine ────────
         wb = await _try_wayback_machine(client, url)
         if wb:
             return {

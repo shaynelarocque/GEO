@@ -3,361 +3,65 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>D3 Briefing Agent</title>
+    <title>GEO: Government Engine Optimization</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>D3 Admissions Briefing Agent</h1>
-            <p class="subtitle">Submit an application to generate an AI-powered admissions brief.</p>
+            <h1>GEO: Government Engine Optimization</h1>
+            <p class="subtitle">Audit a federal program against its own stated promises, before it fails.</p>
         </header>
 
-        <!-- Brief History -->
         <div id="history-panel" class="history-panel" style="display:none">
             <div class="history-header">
-                <span>Recent Briefs</span>
+                <span>Recent Audits</span>
                 <button class="history-clear-btn" onclick="clearBriefHistory()">Clear all</button>
             </div>
             <div class="history-list" id="history-list"></div>
         </div>
 
         <form action="/submit" method="POST">
-
-            <!-- Section 1: About the Startup -->
             <fieldset>
-                <legend>About the Startup</legend>
+                <legend>Program to audit</legend>
 
                 <div class="form-group">
-                    <label for="startup_name">Startup / Project Name</label>
-                    <input type="text" id="startup_name" name="startup_name"
-                           value="Training Club" required>
+                    <label for="program_name">Federal program name</label>
+                    <p class="help-text">The program as it would appear on canada.ca, in a Departmental Plan, or in a press release. The agent will resolve the funded recipient.</p>
+                    <input type="text" id="program_name" name="program_name"
+                           value="PrescribeIT" required autofocus>
                 </div>
 
                 <div class="form-group">
-                    <label for="problem_statement">What problem, need or social issue are you trying to solve?</label>
-                    <p class="help-text">Be specific about who is affected and why existing solutions fall short. Early-stage ideas are welcome — you don't need a solution yet to answer this.</p>
-                    <textarea id="problem_statement" name="problem_statement" rows="5" required>Fitness tracking is fragmented across dozens of siloed apps — Strava for running, Whoop for recovery, MyFitnessPal for nutrition, Apple Fitness for steps — and none of them talk to each other meaningfully. The social layer is either gamified in ways that don't drive real accountability (leaderboards, badges) or completely absent for non-runners. People who do diverse types of movement — lifting, climbing, yoga, cycling, swimming — have no home base. The result: most people drop tracking altogether within weeks because the friction outweighs the value. Meanwhile, working out with or alongside a friend — one of the most effective motivators in exercise science — is impossible to do digitally in any meaningful way.</textarea>
+                    <label for="recipient_hint">Recipient hint <span class="optional">(optional)</span></label>
+                    <p class="help-text">If you already know the funded recipient (e.g. an arms-length nonprofit, Crown corp, or third party), name it here to short-circuit entity resolution.</p>
+                    <input type="text" id="recipient_hint" name="recipient_hint"
+                           value="Canada Health Infoway">
                 </div>
 
                 <div class="form-group">
-                    <label for="solution">What is your current proposed solution, and what makes it unique?</label>
-                    <p class="help-text">Describe what you've built or plan to build. It's okay if it's still an idea — just tell us where you are.</p>
-                    <textarea id="solution" name="solution" rows="5" required>Training Club is a movement-agnostic fitness companion that unifies workout logging, nutrition tracking, and social accountability in one place. Any activity counts — running, lifting, climbing, yoga, cycling, or a walk with your dog. What makes it unique is Jam Sessions: real-time shared workout experiences inspired by Spotify's collaborative listening model. You and a friend start a session together, see each other's live progress (reps, sets, time, pace), react in the moment, and finish together — even if you're in different cities. We have a working prototype. The product is designed mobile-first with a deliberate focus on feel and simplicity over data overload — most fitness apps are built for obsessives; we're building for everyone who just wants to move and not lose track of it.</textarea>
-                </div>
-
-                <div class="form-group">
-                    <label>UN Sustainable Development Goals</label>
-                    <p class="help-text">Select the goals your work most directly contributes to. Don't select goals just because they sound relevant — the brief will assess the coherence of your choices.</p>
-                    <div class="sdg-grid">
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 1: No Poverty"> 1: No Poverty</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 2: Zero Hunger"> 2: Zero Hunger</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 3: Good Health and Well-Being" checked> 3: Good Health</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 4: Quality Education"> 4: Quality Education</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 5: Gender Equality"> 5: Gender Equality</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 6: Clean Water and Sanitation"> 6: Clean Water</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 7: Affordable and Clean Energy"> 7: Clean Energy</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 8: Decent Work and Economic Growth"> 8: Decent Work</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 9: Industry Innovation and Infrastructure"> 9: Innovation</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 10: Reduced Inequalities" checked> 10: Reduced Inequalities</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 11: Sustainable Cities and Communities"> 11: Sustainable Cities</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 12: Responsible Consumption and Production"> 12: Responsible Consumption</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 13: Climate Action"> 13: Climate Action</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 14: Life Below Water"> 14: Life Below Water</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 15: Life on Land"> 15: Life on Land</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 16: Peace Justice and Strong Institutions"> 16: Peace &amp; Justice</label>
-                        <label class="checkbox-label"><input type="checkbox" name="sdgs" value="Goal 17: Partnerships for the Goals"> 17: Partnerships</label>
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <label for="prior_incubator">Have you participated in an incubator or entrepreneurship program?</label>
-                    <p class="help-text">Include accelerators, hackathons with mentorship components, or university entrepreneurship programs. Leave blank if none.</p>
-                    <input type="text" id="prior_incubator" name="prior_incubator"
-                           placeholder="e.g. Founder Fuel, Next AI, Concordia's JMSB... or leave blank">
-                </div>
-
-                <div class="form-group">
-                    <label for="website_url">Startup Website URL</label>
-                    <p class="help-text">A landing page, product site, or personal portfolio showcasing the project. Even a prototype link or Notion page is useful.</p>
-                    <input type="url" id="website_url" name="website_url"
-                           value="https://trainingclub.app"
-                           placeholder="https://...">
-                </div>
-
-                <div class="form-group">
-                    <label for="canada_incorporated">Registered / planning to register in Canada?</label>
-                    <p class="help-text">D3 requires founders to be legally permitted to work and/or study in Canada. Incorporation is not required to apply.</p>
-                    <select id="canada_incorporated" name="canada_incorporated">
-                        <option value="true">Yes</option>
-                        <option value="false" selected>No — not yet incorporated</option>
+                    <label for="model">Model</label>
+                    <select id="model" name="model">
+                        {% for m in models %}
+                        <option value="{{ m.id }}"{% if m.id == default_model_id %} selected{% endif %}>{{ m.display_name }}{% if m.id == default_model_id %} (default){% endif %}</option>
+                        {% endfor %}
                     </select>
+                    {% if catalog_error %}
+                    <p class="help-text" style="color:#a44">Live catalog fetch failed ({{ catalog_error }}); showing fallback list.</p>
+                    {% endif %}
                 </div>
             </fieldset>
-
-            <!-- Section 2: About the Team -->
-            <fieldset>
-                <legend>About the Team</legend>
-
-                <div class="form-group">
-                    <label for="how_team_formed">How was the team formed?</label>
-                    <select id="how_team_formed" name="how_team_formed">
-                        <option value="We studied together">We studied together</option>
-                        <option value="We worked together">We worked together</option>
-                        <option value="We were friends or family" selected>We were friends or family</option>
-                        <option value="We met at an event">We met at an event</option>
-                    </select>
-                </div>
-
-                <div class="form-group">
-                    <label for="how_long_known">How long have you known each other?</label>
-                    <select id="how_long_known" name="how_long_known">
-                        <option value="1 year or less">1 year or less</option>
-                        <option value="1 to 3 years">1 to 3 years</option>
-                        <option value="4 to 7 years" selected>4 to 7 years</option>
-                        <option value="7 years or more">7 years or more</option>
-                    </select>
-                </div>
-
-                <div class="form-group">
-                    <label for="additional_team_info">Any other information about your team?</label>
-                    <p class="help-text">Anything else that helps us understand how you work together, your complementary skills, or your commitment to this project.</p>
-                    <textarea id="additional_team_info" name="additional_team_info" rows="3">We've been friends and occasional collaborators for several years. Training Club started as a side project — Shayne designed the product and John built it. Both of us are currently working full-time, which means our hours are limited but our conviction is high. We work well together because our skills don't overlap: Shayne owns everything product and design, John owns everything engineering. We have a working prototype that we use ourselves daily.</textarea>
-                </div>
-            </fieldset>
-
-            <!-- Section 3: Founders -->
-            <div id="founders-container">
-
-                <fieldset class="founder-fieldset" data-index="0">
-                    <legend>Founder 1</legend>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>First Name</label>
-                            <input type="text" name="founder_0_first_name" value="Shayne" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Last Name</label>
-                            <input type="text" name="founder_0_last_name" value="La Rocque" required>
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Email</label>
-                            <input type="email" name="founder_0_email" value="shayne@trainingclub.app" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Phone</label>
-                            <input type="tel" name="founder_0_phone" placeholder="Optional">
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Status in Canada</label>
-                            <select name="founder_0_canada_status">
-                                <option value="Canadian citizen or Permanent resident" selected>Citizen / PR</option>
-                                <option value="Have a valid work permit">Work Permit</option>
-                                <option value="Have a student visa">Student Visa</option>
-                                <option value="None of the above">None of the above</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Hours/week on startup</label>
-                            <p class="help-text">Be honest — this helps us understand your current stage and commitment level.</p>
-                            <select name="founder_0_hours_per_week">
-                                <option value="Less than 10 hours">Less than 10</option>
-                                <option value="10 to 20 hours" selected>10–20</option>
-                                <option value="20 to 30 hours">20–30</option>
-                                <option value="30 hours or more">30+</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Professional Profile Links</label>
-                        <p class="help-text">Enter one URL per line. Include anything that gives context on your background — LinkedIn, personal site, portfolio, GitHub, Dribbble, AngelList, Google Scholar, published work, or anything else relevant. The more the agent has to work with, the richer the brief. If you don't have any public profiles, leave this blank — it won't penalise your application, but it will trigger a Human Review flag for the ops team.</p>
-                        <textarea name="founder_0_profile_url" rows="3" placeholder="https://linkedin.com/in/yourname
-https://yoursite.com
-https://github.com/yourhandle">https://www.linkedin.com/in/shaynelarocque/
-https://shaynelarocque.com</textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Current Role / Occupation</label>
-                        <p class="help-text">e.g. "Senior product designer at Shopify", "Full-time on this startup", "Freelance UX designer"</p>
-                        <input type="text" name="founder_0_current_role"
-                               value="Senior Product Designer (full-time) / Co-founder, Training Club">
-                    </div>
-                    <div class="form-group">
-                        <label>Relevant Background (2–3 sentences)</label>
-                        <p class="help-text">What experience, training, or skills do you bring that specifically positions you to tackle this problem? Focus on what's most relevant to this venture.</p>
-                        <textarea name="founder_0_relevant_background" rows="4">I'm a product designer with 6+ years of experience designing consumer mobile apps. I led design on Training Club end-to-end — from early-stage research and concept exploration through to high-fidelity interactive prototypes. My background is in mobile UX and design systems, with a strong focus on reducing friction and making complex experiences feel effortless.</textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Prior Founding Experience</label>
-                        <p class="help-text">Have you previously started or co-founded a company, project, or initiative? Briefly describe it. Leave blank if not applicable.</p>
-                        <input type="text" name="founder_0_prior_founding_experience"
-                               placeholder="Leave blank if not applicable">
-                    </div>
-                </fieldset>
-
-                <fieldset class="founder-fieldset" data-index="1">
-                    <legend>Founder 2</legend>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>First Name</label>
-                            <input type="text" name="founder_1_first_name" value="John" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Last Name</label>
-                            <input type="text" name="founder_1_last_name" value="Rockwell" required>
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Email</label>
-                            <input type="email" name="founder_1_email" value="john@trainingclub.app" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Phone</label>
-                            <input type="tel" name="founder_1_phone" placeholder="Optional">
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Status in Canada</label>
-                            <select name="founder_1_canada_status">
-                                <option value="Canadian citizen or Permanent resident" selected>Citizen / PR</option>
-                                <option value="Have a valid work permit">Work Permit</option>
-                                <option value="Have a student visa">Student Visa</option>
-                                <option value="None of the above">None of the above</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Hours/week on startup</label>
-                            <p class="help-text">Be honest — this helps us understand your current stage and commitment level.</p>
-                            <select name="founder_1_hours_per_week">
-                                <option value="Less than 10 hours">Less than 10</option>
-                                <option value="10 to 20 hours" selected>10–20</option>
-                                <option value="20 to 30 hours">20–30</option>
-                                <option value="30 hours or more">30+</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Professional Profile Links</label>
-                        <p class="help-text">Enter one URL per line. Include anything that gives context on your background — LinkedIn, personal site, portfolio, GitHub, Dribbble, AngelList, Google Scholar, published work, or anything else relevant. The more the agent has to work with, the richer the brief. If you don't have any public profiles, leave this blank — it won't penalise your application, but it will trigger a Human Review flag for the ops team.</p>
-                        <textarea name="founder_1_profile_url" rows="3" placeholder="https://linkedin.com/in/yourname
-https://yoursite.com
-https://github.com/yourhandle">https://www.linkedin.com/in/j-rockwell/
-https://jrockwell.dev</textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Current Role / Occupation</label>
-                        <p class="help-text">e.g. "Senior product designer at Shopify", "Full-time on this startup", "Freelance UX designer"</p>
-                        <input type="text" name="founder_1_current_role"
-                               value="Software Engineer (full-time) / Co-founder, Training Club">
-                    </div>
-                    <div class="form-group">
-                        <label>Relevant Background (2–3 sentences)</label>
-                        <p class="help-text">What experience, training, or skills do you bring that specifically positions you to tackle this problem? Focus on what's most relevant to this venture.</p>
-                        <textarea name="founder_1_relevant_background" rows="4">I'm a software engineer with 5+ years building consumer web and mobile applications. I built the Training Club prototype from the ground up, including the real-time Jam Session infrastructure using WebSockets. I'm comfortable across the full stack and have shipped production apps used by real users.</textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Prior Founding Experience</label>
-                        <p class="help-text">Have you previously started or co-founded a company, project, or initiative? Briefly describe it. Leave blank if not applicable.</p>
-                        <input type="text" name="founder_1_prior_founding_experience"
-                               placeholder="Leave blank if not applicable">
-                    </div>
-                </fieldset>
-
-            </div>
-
-            <button type="button" class="btn btn-secondary" onclick="addFounder()">+ Add Founder</button>
 
             <div class="form-actions">
-                <select name="model" class="model-select" title="Model">
-                    <option value="claude-sonnet-4-6">Sonnet 4.6 — fast</option>
-                    <option value="claude-opus-4-6">Opus 4.6 — best</option>
-                    <option value="claude-haiku-4-5">Haiku 4.5 — cheapest</option>
-                </select>
-                <button type="submit" class="btn btn-primary">Submit Application for Briefing</button>
+                <button type="submit" class="btn btn-primary">Begin audit</button>
             </div>
         </form>
+
+        <footer class="footer-note">
+            <p><strong>Architectural commitment.</strong> GEO drafts. A human decides. The tool has no capability to send, route, email, or publish any of its outputs, including the accountability instruments it drafts (ATIP requests, Order Paper questions, committee follow-ups). Humans review, edit, and submit.</p>
+        </footer>
     </div>
 
-    <script>
-        // ── Brief history ─────────────────────────────────────────────────
-        (function () {
-            var KEY = 'd3_brief_history';
-
-            function esc(s) {
-                return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-            }
-
-            function relTime(ts) {
-                var diff = Date.now() - ts;
-                var m = Math.floor(diff / 60000);
-                var h = Math.floor(diff / 3600000);
-                var d = Math.floor(diff / 86400000);
-                if (m < 1)  return 'just now';
-                if (m < 60) return m + 'm ago';
-                if (h < 24) return h + 'h ago';
-                if (d < 7)  return d + 'd ago';
-                return new Date(ts).toLocaleDateString(undefined, {month:'short', day:'numeric'});
-            }
-
-            function statusDot(status) {
-                var map = { processing: '🟡', complete: '🟢', error: '🔴' };
-                return map[status] || '⚪';
-            }
-
-            function render() {
-                var list = JSON.parse(localStorage.getItem(KEY) || '[]');
-                var panel = document.getElementById('history-panel');
-                var ul    = document.getElementById('history-list');
-                if (!list.length) { panel.style.display = 'none'; return; }
-
-                ul.innerHTML = list.map(function (h) {
-                    return '<a href="/results/' + h.app_id + '" class="history-item">'
-                        + '<span class="history-dot">' + statusDot(h.status) + '</span>'
-                        + '<span class="history-name">' + esc(h.name) + '</span>'
-                        + '<span class="history-time">' + relTime(h.ts) + '</span>'
-                        + '</a>';
-                }).join('');
-
-                panel.style.display = 'block';
-            }
-
-            window.clearBriefHistory = function () {
-                localStorage.removeItem(KEY);
-                document.getElementById('history-panel').style.display = 'none';
-            };
-
-            render();
-        })();
-
-        // ── Founders ──────────────────────────────────────────────────────
-        let founderCount = 2;
-
-        function addFounder() {
-            const container = document.getElementById('founders-container');
-            const template = container.querySelector('.founder-fieldset');
-            const clone = template.cloneNode(true);
-            const idx = founderCount;
-
-            clone.dataset.index = idx;
-            clone.querySelector('legend').textContent = `Founder ${idx + 1}`;
-
-            // Update all input/select/textarea names and clear values
-            clone.querySelectorAll('input, select, textarea').forEach(el => {
-                el.name = el.name.replace(/_0_/, `_${idx}_`);
-                if (el.tagName === 'INPUT') el.value = '';
-                if (el.tagName === 'TEXTAREA') el.value = '';
-                if (el.tagName === 'SELECT') el.selectedIndex = 0;
-            });
-
-            container.appendChild(clone);
-            founderCount++;
-        }
-    </script>
+    <script src="/static/app.js"></script>
 </body>
 </html>

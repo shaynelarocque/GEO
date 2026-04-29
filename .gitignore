@@ -17,5 +17,7 @@ scratch/
 # OS
 .DS_Store
 
-# Claude Code (local permissions — keep launch.json)
+# Claude Code (local permissions and session locks; keep launch.json)
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/*.lock

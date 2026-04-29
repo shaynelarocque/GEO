@@ -3,39 +3,46 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Brief: {{ application.startup_name }}</title>
+    <title>Audit: {{ audit_input.program_name }}</title>
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>{{ application.startup_name }}</h1>
+            <h1>{{ audit_input.program_name }}</h1>
             <p class="subtitle">
-                <a href="/">&larr; New Application</a>
+                {% if audit_input.recipient_hint %}<span class="recipient-hint">recipient hint: {{ audit_input.recipient_hint }}</span> · {% endif %}
+                <a href="/">&larr; New audit</a>
                 <span class="status-badge" id="status-badge">Processing...</span>
             </p>
         </header>
 
         <div class="tabs">
             <button class="tab active" onclick="switchTab('log')">Agent Log</button>
-            <button class="tab" onclick="switchTab('brief')">Brief</button>
+            <button class="tab" onclick="switchTab('brief')">Audit Report</button>
             <button class="tab" onclick="switchTab('raw')">Raw Data</button>
         </div>
 
-        <!-- Agent Log Tab (shown first so user sees activity) -->
         <div id="tab-log" class="tab-content active">
             <div id="log-stream"></div>
         </div>
 
-        <!-- Brief Tab -->
         <div id="tab-brief" class="tab-content" style="display:none">
-            <div id="brief-content">
-                <p class="loading">Agent is researching... Brief will appear when complete.</p>
+            <div class="brief-layout">
+                <div id="brief-content" class="brief-main">
+                    <p class="loading">Agent is researching... Audit report will appear when complete.</p>
+                </div>
+                <aside id="reasoning-lane" class="reasoning-lane" aria-label="Reasoning trail">
+                    <header class="lane-header">
+                        <h3>Reasoning trail</h3>
+                        <p class="lane-sub">Self-assessments and direction changes, live.</p>
+                    </header>
+                    <ul id="reasoning-list" class="reasoning-list"></ul>
+                </aside>
             </div>
         </div>
 
-        <!-- Raw Data Tab -->
         <div id="tab-raw" class="tab-content" style="display:none">
             <div id="raw-content">
                 <p class="loading">Waiting for agent to complete...</p>
@@ -45,89 +52,169 @@
 
     <script src="/static/app.js"></script>
     <script>
-        // ── Brief history ─────────────────────────────────────────────────
+        // ── Audit history ─────────────────────────────────────────────────
         (function () {
-            var KEY = 'd3_brief_history';
+            var KEY = 'geo_audit_history';
             var appId = '{{ app_id }}';
-            var name  = {{ application.startup_name | tojson }};
-
+            var name  = {{ audit_input.program_name | tojson }};
             function upsert(status) {
                 var list = JSON.parse(localStorage.getItem(KEY) || '[]');
                 var idx  = list.findIndex(function (h) { return h.app_id === appId; });
-                if (idx >= 0) {
-                    list[idx].status = status;
-                } else {
+                if (idx >= 0) { list[idx].status = status; }
+                else {
                     list.unshift({ app_id: appId, name: name, ts: Date.now(), status: status });
                     list = list.slice(0, 30);
                 }
                 localStorage.setItem(KEY, JSON.stringify(list));
             }
-
-            upsert('processing');                           // record immediately on load
+            upsert('processing');
             window._historyMarkDone  = function () { upsert('complete'); };
             window._historyMarkError = function () { upsert('error'); };
         })();
 
         // ── SSE stream ────────────────────────────────────────────────────
         var logStream = document.getElementById('log-stream');
-        var es = new EventSource('/stream/{{ app_id }}');
+        var reasoningList = document.getElementById('reasoning-list');
+        var es = null;
+        var seenLogCount = 0;
+        var seenReasoningCount = 0;
+        var seenDraftsCount = 0;
 
-        es.addEventListener('log', function(e) {
-            logStream.innerHTML += e.data;
-            logStream.scrollTop = logStream.scrollHeight;
-        });
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
 
-        es.addEventListener('human_input', function(e) {
-            var data = JSON.parse(e.data);
-            var ctx = data.context ? '<p class="human-input-context">' + escapeHtml(data.context) + '</p>' : '';
-            var html =
-                '<div class="human-input-card" id="input-' + data.request_id + '">' +
-                    '<div class="human-input-header">Agent needs your input</div>' +
-                    '<p class="human-input-question">' + escapeHtml(data.question) + '</p>' +
-                    ctx +
-                    '<form class="human-input-form" onsubmit="submitHumanInput(event, \'' + data.request_id + '\')">' +
-                        '<textarea name="response" rows="3" placeholder="Type your answer..."></textarea>' +
-                        '<button type="submit" class="btn btn-primary">Send to Agent</button>' +
-                    '</form>' +
-                '</div>';
-            logStream.innerHTML += html;
-            logStream.scrollTop = logStream.scrollHeight;
-        });
+        function appendReasoning(item) {
+            var kind = item.kind || 'self_assess';
+            var phase = item.phase || 'other';
+            var head = item.headline || '';
+            var detail = item.detail || '';
+            var li = document.createElement('li');
+            li.className = 'reasoning-item reasoning-' + kind;
+            li.innerHTML =
+                '<div class="reasoning-row">' +
+                    '<span class="reasoning-kind reasoning-kind-' + kind + '">' + escapeHtml(kind) + '</span>' +
+                    '<span class="reasoning-phase">' + escapeHtml(phase) + '</span>' +
+                '</div>' +
+                '<div class="reasoning-head">' + escapeHtml(head) + '</div>' +
+                (detail ? '<details class="reasoning-detail"><summary>detail</summary><div>' + escapeHtml(detail) + '</div></details>' : '');
+            reasoningList.appendChild(li);
+            // Trigger a tiny flip-in by toggling a class.
+            requestAnimationFrame(function () { li.classList.add('reasoning-in'); });
+            // Auto-scroll lane to bottom.
+            reasoningList.scrollTop = reasoningList.scrollHeight;
+        }
 
-        es.addEventListener('done', function(e) {
-            es.close();
+        function flashDraftToast(d) {
+            var label = ({
+                atip: 'ATIP request',
+                order_paper_question: 'Order Paper question',
+                committee_followup: 'Committee follow-up',
+            })[d.instrument] || d.instrument;
+            var toast = document.createElement('div');
+            toast.className = 'draft-toast draft-toast-' + d.instrument;
+            toast.innerHTML =
+                '<div class="toast-badge">' + escapeHtml(label) + '</div>' +
+                '<div class="toast-body">Drafted: ' + escapeHtml(d.triggered_by_gap || '') + '</div>' +
+                '<div class="toast-chrome">Tool drafts. Human decides.</div>';
+            document.body.appendChild(toast);
+            requestAnimationFrame(function () { toast.classList.add('toast-in'); });
+            setTimeout(function () {
+                toast.classList.remove('toast-in');
+                toast.addEventListener('transitionend', function () { toast.remove(); }, { once: true });
+            }, 4500);
+        }
 
-            // Check actual status via brief API before marking badge
-            htmx.ajax('GET', '/api/brief/{{ app_id }}', {
-                target: '#brief-content',
-                swap: 'innerHTML'
-            }).then(function () {
-                var hasError = document.querySelector('#brief-content .status-error');
-                var badge = document.getElementById('status-badge');
-                if (hasError) {
-                    badge.textContent = 'Error';
-                    badge.classList.add('status-error-badge');
-                    window._historyMarkError && window._historyMarkError();
-                } else {
-                    badge.textContent = 'Complete';
-                    badge.classList.add('status-complete');
-                    window._historyMarkDone && window._historyMarkDone();
-                }
+        function connectStream() {
+            if (es) { try { es.close(); } catch (e) {} }
+            var badge = document.getElementById('status-badge');
+            badge.textContent = 'Processing...';
+            badge.classList.remove('status-complete');
+            badge.classList.remove('status-error-badge');
+
+            var qs = '?since=' + seenLogCount + '&since_reasoning=' + seenReasoningCount + '&since_drafts=' + seenDraftsCount;
+            es = new EventSource('/stream/{{ app_id }}' + qs);
+
+            es.addEventListener('log', function (e) {
+                logStream.insertAdjacentHTML('beforeend', e.data);
+                logStream.scrollTop = logStream.scrollHeight;
+                seenLogCount += 1;
             });
 
-            htmx.ajax('GET', '/api/raw/{{ app_id }}', {
-                target: '#raw-content',
-                swap: 'innerHTML'
+            es.addEventListener('reasoning', function (e) {
+                try {
+                    var item = JSON.parse(e.data);
+                    appendReasoning(item);
+                    seenReasoningCount += 1;
+                } catch (err) {}
             });
 
-            switchTab('brief');
-        });
+            es.addEventListener('draft_emitted', function (e) {
+                try {
+                    var d = JSON.parse(e.data);
+                    flashDraftToast(d);
+                    seenDraftsCount += 1;
+                } catch (err) {}
+            });
 
-        es.onerror = function() {
-            if (document.getElementById('status-badge').textContent === 'Complete') {
+            es.addEventListener('human_input', function (e) {
+                var data = JSON.parse(e.data);
+                var ctx = data.context ? '<p class="human-input-context">' + escapeHtml(data.context) + '</p>' : '';
+                var html =
+                    '<div class="human-input-card" id="input-' + data.request_id + '">' +
+                        '<div class="human-input-header">Agent needs your input</div>' +
+                        '<p class="human-input-question">' + escapeHtml(data.question) + '</p>' +
+                        ctx +
+                        '<form class="human-input-form" onsubmit="submitHumanInput(event, \'' + data.request_id + '\')">' +
+                            '<textarea name="response" rows="3" placeholder="Type your answer..."></textarea>' +
+                            '<button type="submit" class="btn btn-primary">Send to Agent</button>' +
+                        '</form>' +
+                    '</div>';
+                logStream.insertAdjacentHTML('beforeend', html);
+                logStream.scrollTop = logStream.scrollHeight;
+            });
+
+            es.addEventListener('done', function (e) {
                 es.close();
-            }
-        };
+                try {
+                    var totals = JSON.parse(e.data);
+                    if (totals && totals.log) seenLogCount = totals.log;
+                    if (totals && totals.reasoning) seenReasoningCount = totals.reasoning;
+                    if (totals && totals.drafts) seenDraftsCount = totals.drafts;
+                } catch (err) {}
+
+                htmx.ajax('GET', '/api/brief/{{ app_id }}', {
+                    target: '#brief-content', swap: 'innerHTML',
+                }).then(function () {
+                    var hasError = document.querySelector('#brief-content .status-error');
+                    var b = document.getElementById('status-badge');
+                    if (hasError) {
+                        b.textContent = 'Error';
+                        b.classList.add('status-error-badge');
+                        window._historyMarkError && window._historyMarkError();
+                    } else {
+                        b.textContent = 'Complete';
+                        b.classList.add('status-complete');
+                        window._historyMarkDone && window._historyMarkDone();
+                    }
+                });
+
+                htmx.ajax('GET', '/api/raw/{{ app_id }}', {
+                    target: '#raw-content', swap: 'innerHTML',
+                });
+            });
+
+            es.onerror = function () {
+                if (document.getElementById('status-badge').textContent === 'Complete') {
+                    es.close();
+                }
+            };
+        }
+
+        window.geoReconnectStream = connectStream;
+        connectStream();
     </script>
 </body>
 </html>
